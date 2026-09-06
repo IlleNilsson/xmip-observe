@@ -14,23 +14,30 @@
 use std::collections::BTreeMap;
 
 /// The mood of a scope — observability-model.md section 6. A mood, not a colour:
-/// this names how a scope is doing, and a surface renders it however it likes
-/// (the GUI paints it). Four moods, in worsening order, which is this enum's
-/// ordering.
+/// this names what a human gets out of a thread, process, node or cluster, and
+/// a surface renders it however it likes (the GUI paints it). It is about the
+/// resource under load, not the machine: it tells an operator whether results
+/// are flowing and, when they are not, what to do — change the load, replace the
+/// hardware, fix the one thing that is stuck (ADR-0041).
 ///
-/// **`Done` does not propagate**: it is the mood of a leaf, and any scope above a
-/// `Done` leaf reports `Holding` — attention, drill in — so one fault deep in the
-/// tree does not carry the whole cluster to `Done` (ADR-0041). `Fine` up the tree
-/// still means every leaf beneath is `Fine`.
+/// Five **leaf** moods, in worsening order: `Fine` (results flowing), `Working`
+/// (handling the load), `Stressed` (strained — change the load), `Exhausted`
+/// (spent — replace the hardware), `Done` (blocked or failed — the pain, a cert
+/// to renew, a password, a missing folder).
 ///
-/// `Holding` is a rollup mood: leaves are `Fine`, `Average` or `Done`; an
-/// aggregating scope is `Fine`, `Average` or `Holding`.
+/// `Holding` is the **rollup** mood, not a leaf's: in a perfect world everything
+/// is `Fine`; the moment anything below is not, the parent is displeased and
+/// reports `Holding` — drill in. So a parent is `Fine` or `Holding`, and a leaf
+/// carries the real mood. `Fine` up the tree means every leaf beneath is `Fine`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Health {
     Fine,
-    Average,
-    Holding,
+    Working,
+    Stressed,
+    Exhausted,
     Done,
+    /// Rollup only — a parent with something not-`Fine` beneath it.
+    Holding,
 }
 
 /// What a count counts. Never a bare number — ADR-0027 clause 5.
@@ -144,7 +151,7 @@ impl Snapshot {
                 target.clone(),
                 HealthRecord {
                     scope: target.clone(),
-                    health: Health::Average,
+                    health: Health::Stressed,
                     severity: PAUSED_SEVERITY,
                     evidence: format!("paused by {who}"),
                     observed_unix_nanos: now,
@@ -207,16 +214,16 @@ impl Snapshot {
     /// The rolled-up health at or beneath a scope, or `None` when nothing is
     /// recorded there.
     ///
-    /// A red **does not propagate**: at the leaf that owns it the state is red,
-    /// but any scope *above* that leaf reports `Orange` — attention, drill in
-    /// (observability-model §6, ADR-0041). So the worst a red among thousands can
-    /// do to the cluster is turn it orange, and an operator drills down through
-    /// the oranges and yellows to the red itself. Green up the tree still means
-    /// every leaf beneath is green.
+    /// A leaf's mood **does not propagate**: in a perfect world everything is
+    /// `Fine`, and the moment anything below is not, the parent is displeased and
+    /// reports `Holding` — drill in (observability-model §6, ADR-0041). So a
+    /// parent is only ever `Fine` or `Holding`; the leaf that owns the trouble
+    /// carries the real mood, and an operator drills down through the `Holding`
+    /// scopes to it. `Fine` up the tree still means every leaf beneath is `Fine`.
     #[must_use]
     pub fn worst(&self, scope: &str) -> Option<Health> {
         let record = self.health(scope).into_iter().next()?;
-        if record.health == Health::Done && record.scope != scope {
+        if record.scope != scope && record.health != Health::Fine {
             Some(Health::Holding)
         } else {
             Some(record.health)
@@ -298,10 +305,9 @@ mod tests {
     }
 
     #[test]
-    fn a_red_leaf_shows_red_but_rolls_up_as_orange() {
-        // ADR-0041: a red does not propagate. The leaf that owns it is red; every
-        // scope above it is orange — attention, drill in — so one fault cannot
-        // paint the cluster red.
+    fn a_done_leaf_carries_its_mood_but_rolls_up_as_holding() {
+        // ADR-0041: a leaf's mood does not propagate. The leaf that owns the
+        // trouble keeps its mood; the parent is displeased — Holding — drill in.
         let mut snapshot = Snapshot::new();
         snapshot.record_health(health("xmip:///edge-01/receive/a", Health::Fine, 0));
         snapshot.record_health(health("xmip:///edge-01/receive/b", Health::Done, 90));
@@ -309,23 +315,29 @@ mod tests {
         assert_eq!(
             snapshot.worst("xmip:///edge-01"),
             Some(Health::Holding),
-            "a red below rolls up as orange, not red"
+            "a done leaf leaves the parent holding, not done"
         );
         assert_eq!(
             snapshot.worst("xmip:///edge-01/receive/b"),
             Some(Health::Done),
-            "the leaf that owns the fault is still red"
+            "the leaf that owns the trouble keeps its mood"
         );
     }
 
     #[test]
-    fn a_yellow_below_still_rolls_up_as_yellow() {
-        // Only red is capped; yellow propagates unchanged.
+    fn any_non_fine_leaf_rolls_up_as_holding() {
+        // Not only Done: the moment anything below is not Fine, the parent is
+        // Holding — a Working leaf below still leaves the parent displeased.
         let mut snapshot = Snapshot::new();
         snapshot.record_health(health("xmip:///edge-01/receive/a", Health::Fine, 0));
-        snapshot.record_health(health("xmip:///edge-01/receive/b", Health::Average, 40));
+        snapshot.record_health(health("xmip:///edge-01/receive/b", Health::Working, 20));
 
-        assert_eq!(snapshot.worst("xmip:///edge-01"), Some(Health::Average));
+        assert_eq!(snapshot.worst("xmip:///edge-01"), Some(Health::Holding));
+        // The leaf itself still shows what it is doing.
+        assert_eq!(
+            snapshot.worst("xmip:///edge-01/receive/b"),
+            Some(Health::Working)
+        );
     }
 
     #[test]
@@ -333,8 +345,8 @@ mod tests {
         // The word says which colour; the number orders within it, so the
         // worst thing an operator can act on is the top row.
         let mut snapshot = Snapshot::new();
-        snapshot.record_health(health("xmip:///n/receive/mild", Health::Average, 40));
-        snapshot.record_health(health("xmip:///n/receive/severe", Health::Average, 85));
+        snapshot.record_health(health("xmip:///n/receive/mild", Health::Stressed, 40));
+        snapshot.record_health(health("xmip:///n/receive/severe", Health::Stressed, 85));
 
         let ordered = snapshot.health("xmip:///n");
         assert_eq!(ordered[0].scope, "xmip:///n/receive/severe");
@@ -356,7 +368,7 @@ mod tests {
 
         assert_eq!(paused, 1);
         let record = &snapshot.health("xmip:///edge-01/receive/orders")[0];
-        assert_eq!(record.health, Health::Average);
+        assert_eq!(record.health, Health::Stressed);
         assert_eq!(record.severity, PAUSED_SEVERITY);
         assert!(record.evidence.contains("ilian"));
         // A paused Location is doing nothing, so its count is gone and a fresh
@@ -380,7 +392,10 @@ mod tests {
         snapshot.record_health(health("xmip:///n/receive/a", Health::Done, 70));
 
         snapshot.pause("xmip:///n/receive/a", "ilian", 2_000);
-        assert_eq!(snapshot.worst("xmip:///n/receive/a"), Some(Health::Average));
+        assert_eq!(
+            snapshot.worst("xmip:///n/receive/a"),
+            Some(Health::Stressed)
+        );
 
         let resumed = snapshot.resume("xmip:///n/receive/a");
         assert_eq!(resumed, 1);
@@ -413,6 +428,9 @@ mod tests {
 
         snapshot.record_health(health("xmip:///n/receive/a", Health::Fine, 0));
 
-        assert_eq!(snapshot.worst("xmip:///n/receive/a"), Some(Health::Average));
+        assert_eq!(
+            snapshot.worst("xmip:///n/receive/a"),
+            Some(Health::Stressed)
+        );
     }
 }
