@@ -143,7 +143,7 @@ mod tests {
 
         for tick in 0..3 {
             let mut snapshot = Snapshot::new();
-            snapshot.record_health(health("xmip:///n/receive/a", Health::Green, tick));
+            snapshot.record_health(health("xmip:///n/receive/a", Health::Fine, tick));
             snapshot.record_count(count("xmip:///n", u64::try_from(tick).unwrap_or(0), tick));
             history.record(&snapshot);
         }
@@ -164,7 +164,7 @@ mod tests {
 
         for tick in 0..5 {
             let mut snapshot = Snapshot::new();
-            snapshot.record_health(health("xmip:///n/receive/a", Health::Green, tick));
+            snapshot.record_health(health("xmip:///n/receive/a", Health::Fine, tick));
             history.record(&snapshot);
         }
 
@@ -180,7 +180,7 @@ mod tests {
 
         for tick in 0..5 {
             let mut snapshot = Snapshot::new();
-            snapshot.record_health(health("xmip:///n/send/b", Health::Green, tick));
+            snapshot.record_health(health("xmip:///n/send/b", Health::Fine, tick));
             history.record(&snapshot);
         }
 

@@ -13,13 +13,24 @@
 
 use std::collections::BTreeMap;
 
-/// observability-model.md section 6. Worst wins upward, and that is this
-/// enum's ordering. Three states and no fourth — the owner, 2026-09-05.
+/// The mood of a scope — observability-model.md section 6. A mood, not a colour:
+/// this names how a scope is doing, and a surface renders it however it likes
+/// (the GUI paints it). Four moods, in worsening order, which is this enum's
+/// ordering.
+///
+/// **`Done` does not propagate**: it is the mood of a leaf, and any scope above a
+/// `Done` leaf reports `Holding` — attention, drill in — so one fault deep in the
+/// tree does not carry the whole cluster to `Done` (ADR-0041). `Fine` up the tree
+/// still means every leaf beneath is `Fine`.
+///
+/// `Holding` is a rollup mood: leaves are `Fine`, `Average` or `Done`; an
+/// aggregating scope is `Fine`, `Average` or `Holding`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Health {
-    Green,
-    Yellow,
-    Red,
+    Fine,
+    Average,
+    Holding,
+    Done,
 }
 
 /// What a count counts. Never a bare number — ADR-0027 clause 5.
@@ -133,7 +144,7 @@ impl Snapshot {
                 target.clone(),
                 HealthRecord {
                     scope: target.clone(),
-                    health: Health::Yellow,
+                    health: Health::Average,
                     severity: PAUSED_SEVERITY,
                     evidence: format!("paused by {who}"),
                     observed_unix_nanos: now,
@@ -193,11 +204,23 @@ impl Snapshot {
         found
     }
 
-    /// The worst health at or beneath a scope, or `None` when nothing is
+    /// The rolled-up health at or beneath a scope, or `None` when nothing is
     /// recorded there.
+    ///
+    /// A red **does not propagate**: at the leaf that owns it the state is red,
+    /// but any scope *above* that leaf reports `Orange` — attention, drill in
+    /// (observability-model §6, ADR-0041). So the worst a red among thousands can
+    /// do to the cluster is turn it orange, and an operator drills down through
+    /// the oranges and yellows to the red itself. Green up the tree still means
+    /// every leaf beneath is green.
     #[must_use]
     pub fn worst(&self, scope: &str) -> Option<Health> {
-        self.health(scope).first().map(|record| record.health)
+        let record = self.health(scope).into_iter().next()?;
+        if record.health == Health::Done && record.scope != scope {
+            Some(Health::Holding)
+        } else {
+            Some(record.health)
+        }
     }
 
     /// One kind of count, summed over everything at and beneath a scope. The
@@ -275,12 +298,34 @@ mod tests {
     }
 
     #[test]
-    fn a_node_is_as_healthy_as_its_worst_part() {
+    fn a_red_leaf_shows_red_but_rolls_up_as_orange() {
+        // ADR-0041: a red does not propagate. The leaf that owns it is red; every
+        // scope above it is orange — attention, drill in — so one fault cannot
+        // paint the cluster red.
         let mut snapshot = Snapshot::new();
-        snapshot.record_health(health("xmip:///edge-01/receive/a", Health::Green, 0));
-        snapshot.record_health(health("xmip:///edge-01/receive/b", Health::Red, 90));
+        snapshot.record_health(health("xmip:///edge-01/receive/a", Health::Fine, 0));
+        snapshot.record_health(health("xmip:///edge-01/receive/b", Health::Done, 90));
 
-        assert_eq!(snapshot.worst("xmip:///edge-01"), Some(Health::Red));
+        assert_eq!(
+            snapshot.worst("xmip:///edge-01"),
+            Some(Health::Holding),
+            "a red below rolls up as orange, not red"
+        );
+        assert_eq!(
+            snapshot.worst("xmip:///edge-01/receive/b"),
+            Some(Health::Done),
+            "the leaf that owns the fault is still red"
+        );
+    }
+
+    #[test]
+    fn a_yellow_below_still_rolls_up_as_yellow() {
+        // Only red is capped; yellow propagates unchanged.
+        let mut snapshot = Snapshot::new();
+        snapshot.record_health(health("xmip:///edge-01/receive/a", Health::Fine, 0));
+        snapshot.record_health(health("xmip:///edge-01/receive/b", Health::Average, 40));
+
+        assert_eq!(snapshot.worst("xmip:///edge-01"), Some(Health::Average));
     }
 
     #[test]
@@ -288,8 +333,8 @@ mod tests {
         // The word says which colour; the number orders within it, so the
         // worst thing an operator can act on is the top row.
         let mut snapshot = Snapshot::new();
-        snapshot.record_health(health("xmip:///n/receive/mild", Health::Yellow, 40));
-        snapshot.record_health(health("xmip:///n/receive/severe", Health::Yellow, 85));
+        snapshot.record_health(health("xmip:///n/receive/mild", Health::Average, 40));
+        snapshot.record_health(health("xmip:///n/receive/severe", Health::Average, 85));
 
         let ordered = snapshot.health("xmip:///n");
         assert_eq!(ordered[0].scope, "xmip:///n/receive/severe");
@@ -304,14 +349,14 @@ mod tests {
     #[test]
     fn pausing_turns_a_scope_yellow_and_stops_its_counts() {
         let mut snapshot = Snapshot::new();
-        snapshot.record_health(health("xmip:///edge-01/receive/orders", Health::Green, 0));
+        snapshot.record_health(health("xmip:///edge-01/receive/orders", Health::Fine, 0));
         snapshot.record_count(count("xmip:///edge-01/receive/orders", 40));
 
         let paused = snapshot.pause("xmip:///edge-01/receive/orders", "ilian", 2_000);
 
         assert_eq!(paused, 1);
         let record = &snapshot.health("xmip:///edge-01/receive/orders")[0];
-        assert_eq!(record.health, Health::Yellow);
+        assert_eq!(record.health, Health::Average);
         assert_eq!(record.severity, PAUSED_SEVERITY);
         assert!(record.evidence.contains("ilian"));
         // A paused Location is doing nothing, so its count is gone and a fresh
@@ -332,24 +377,24 @@ mod tests {
     #[test]
     fn resume_puts_back_exactly_what_was_there() {
         let mut snapshot = Snapshot::new();
-        snapshot.record_health(health("xmip:///n/receive/a", Health::Red, 70));
+        snapshot.record_health(health("xmip:///n/receive/a", Health::Done, 70));
 
         snapshot.pause("xmip:///n/receive/a", "ilian", 2_000);
-        assert_eq!(snapshot.worst("xmip:///n/receive/a"), Some(Health::Yellow));
+        assert_eq!(snapshot.worst("xmip:///n/receive/a"), Some(Health::Average));
 
         let resumed = snapshot.resume("xmip:///n/receive/a");
         assert_eq!(resumed, 1);
         let record = &snapshot.health("xmip:///n/receive/a")[0];
-        assert_eq!(record.health, Health::Red);
+        assert_eq!(record.health, Health::Done);
         assert_eq!(record.severity, 70);
     }
 
     #[test]
     fn pausing_a_stage_pauses_every_location_in_it() {
         let mut snapshot = Snapshot::new();
-        snapshot.record_health(health("xmip:///n/receive/a", Health::Green, 0));
-        snapshot.record_health(health("xmip:///n/receive/b", Health::Green, 0));
-        snapshot.record_health(health("xmip:///n/send/c", Health::Green, 0));
+        snapshot.record_health(health("xmip:///n/receive/a", Health::Fine, 0));
+        snapshot.record_health(health("xmip:///n/receive/b", Health::Fine, 0));
+        snapshot.record_health(health("xmip:///n/send/c", Health::Fine, 0));
 
         let paused = snapshot.pause("xmip:///n/receive", "ilian", 2_000);
 
@@ -363,11 +408,11 @@ mod tests {
         // The node goes on observing while an operator holds a Location down;
         // its fresh reading must not un-pause it.
         let mut snapshot = Snapshot::new();
-        snapshot.record_health(health("xmip:///n/receive/a", Health::Green, 0));
+        snapshot.record_health(health("xmip:///n/receive/a", Health::Fine, 0));
         snapshot.pause("xmip:///n/receive/a", "ilian", 2_000);
 
-        snapshot.record_health(health("xmip:///n/receive/a", Health::Green, 0));
+        snapshot.record_health(health("xmip:///n/receive/a", Health::Fine, 0));
 
-        assert_eq!(snapshot.worst("xmip:///n/receive/a"), Some(Health::Yellow));
+        assert_eq!(snapshot.worst("xmip:///n/receive/a"), Some(Health::Average));
     }
 }
