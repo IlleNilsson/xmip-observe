@@ -49,9 +49,9 @@ pub enum Counted {
     Bytes,
 }
 
-/// The severity a paused scope publishes. A category, not a measurement: an
-/// operator's deliberate stop is the correctable yellow of section 6, and it
-/// is the same yellow however long it lasts.
+/// The severity a paused scope publishes. A category, not a measurement: a
+/// deliberate stop is a correctable state, and it stays that however long it
+/// lasts.
 pub const PAUSED_SEVERITY: u8 = 30;
 
 /// One scope's health, how far from healthy it is, the one line that explains
@@ -60,9 +60,9 @@ pub const PAUSED_SEVERITY: u8 = 30;
 pub struct HealthRecord {
     pub scope: String,
     pub health: Health,
-    /// 0 to 100, shading the colour. Green is 0; red at 100 is as bad as it
-    /// gets. Xmip will not always run smoothly, and the word alone cannot say
-    /// whether a yellow is worth a look now or tonight.
+    /// 0 to 100, shading the mood within itself. 0 is the mildest; 100 is as bad
+    /// as that mood gets. The mood alone cannot say whether one worth a look now
+    /// or tonight — the number does.
     pub severity: u8,
     pub evidence: String,
     pub observed_unix_nanos: i64,
@@ -130,9 +130,9 @@ impl Snapshot {
         self.counts.values()
     }
 
-    /// Pause everything at and beneath a scope. Each affected record is set to
-    /// yellow at [`PAUSED_SEVERITY`], its prior state kept for resume, and its
-    /// counts stop. `who` names the operator, for the evidence line. Returns
+    /// Pause everything at and beneath a scope. Each affected record is held at
+    /// [`PAUSED_SEVERITY`], its prior state kept for resume, and its counts stop.
+    /// `who` names the operator, for the evidence line. Returns
     /// how many scopes it paused — zero when the scope names nothing.
     pub fn pause(&mut self, scope: &str, who: &str, now: i64) -> usize {
         let targets: Vec<String> = self
@@ -189,8 +189,8 @@ impl Snapshot {
         self.paused.keys().any(|paused| beneath(scope, paused))
     }
 
-    /// Health at and beneath a scope, worst first and, within a state, most
-    /// severe first — a red at 90 above a red at 60, so the worst thing an
+    /// Health at and beneath a scope, worst first and, within a mood, most
+    /// severe first — a Done at 90 above a Done at 60, so the worst thing an
     /// operator can do something about is the first thing they see.
     #[must_use]
     pub fn health(&self, scope: &str) -> Vec<HealthRecord> {
@@ -342,7 +342,7 @@ mod tests {
 
     #[test]
     fn within_a_state_the_more_severe_comes_first() {
-        // The word says which colour; the number orders within it, so the
+        // The mood says which; the number orders within it, so the
         // worst thing an operator can act on is the top row.
         let mut snapshot = Snapshot::new();
         snapshot.record_health(health("xmip:///n/receive/mild", Health::Stressed, 40));
@@ -359,7 +359,7 @@ mod tests {
     }
 
     #[test]
-    fn pausing_turns_a_scope_yellow_and_stops_its_counts() {
+    fn pausing_holds_a_scope_stressed_and_stops_its_counts() {
         let mut snapshot = Snapshot::new();
         snapshot.record_health(health("xmip:///edge-01/receive/orders", Health::Fine, 0));
         snapshot.record_count(count("xmip:///edge-01/receive/orders", 40));

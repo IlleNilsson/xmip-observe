@@ -8,7 +8,8 @@
 //! snapshot and nothing else. ADR-0027 clause 6.
 //!
 //! `Grey` and `Black` left on 2026-09-04. No document defined them; section 6
-//! has three states and ADR-0027 adds a fourth that only a surface may say.
+//! names the moods — `Fine`, `Working`, `Stressed`, `Exhausted`, `Done` — with
+//! `Holding` the rollup only a parent shows (ADR-0041).
 
 pub mod activity;
 pub mod history;
