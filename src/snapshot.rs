@@ -20,10 +20,11 @@ use std::collections::BTreeMap;
 /// are flowing and, when they are not, what to do — change the load, replace the
 /// hardware, fix the one thing that is stuck (ADR-0041).
 ///
-/// Five **leaf** moods, in worsening order: `Fine` (results flowing), `Working`
-/// (handling the load), `Stressed` (strained — change the load), `Exhausted`
-/// (spent — replace the hardware), `Done` (blocked or failed — the pain, a cert
-/// to renew, a password, a missing folder).
+/// The **leaf** moods, in worsening order: `Fine` (results flowing), `Paused` (a
+/// deliberate hold — an operator is working on it), `Working` (handling the
+/// load), `Stressed` (strained — change the load), `Exhausted` (spent — replace
+/// the hardware), `Done` (blocked or failed — the pain, a cert to renew, a
+/// password, a missing folder).
 ///
 /// `Holding` is the **rollup** mood, not a leaf's: in a perfect world everything
 /// is `Fine`; the moment anything below is not, the parent is displeased and
@@ -32,6 +33,9 @@ use std::collections::BTreeMap;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Health {
     Fine,
+    /// A deliberate hold — an operator is working on it. Not a fault and not
+    /// strain; it yields nothing because someone paused it on purpose.
+    Paused,
     Working,
     Stressed,
     Exhausted,
@@ -151,7 +155,7 @@ impl Snapshot {
                 target.clone(),
                 HealthRecord {
                     scope: target.clone(),
-                    health: Health::Stressed,
+                    health: Health::Paused,
                     severity: PAUSED_SEVERITY,
                     evidence: format!("paused by {who}"),
                     observed_unix_nanos: now,
@@ -359,7 +363,7 @@ mod tests {
     }
 
     #[test]
-    fn pausing_holds_a_scope_stressed_and_stops_its_counts() {
+    fn pausing_holds_a_scope_and_stops_its_counts() {
         let mut snapshot = Snapshot::new();
         snapshot.record_health(health("xmip:///edge-01/receive/orders", Health::Fine, 0));
         snapshot.record_count(count("xmip:///edge-01/receive/orders", 40));
@@ -368,7 +372,7 @@ mod tests {
 
         assert_eq!(paused, 1);
         let record = &snapshot.health("xmip:///edge-01/receive/orders")[0];
-        assert_eq!(record.health, Health::Stressed);
+        assert_eq!(record.health, Health::Paused);
         assert_eq!(record.severity, PAUSED_SEVERITY);
         assert!(record.evidence.contains("ilian"));
         // A paused Location is doing nothing, so its count is gone and a fresh
@@ -392,10 +396,7 @@ mod tests {
         snapshot.record_health(health("xmip:///n/receive/a", Health::Done, 70));
 
         snapshot.pause("xmip:///n/receive/a", "ilian", 2_000);
-        assert_eq!(
-            snapshot.worst("xmip:///n/receive/a"),
-            Some(Health::Stressed)
-        );
+        assert_eq!(snapshot.worst("xmip:///n/receive/a"), Some(Health::Paused));
 
         let resumed = snapshot.resume("xmip:///n/receive/a");
         assert_eq!(resumed, 1);
@@ -428,9 +429,6 @@ mod tests {
 
         snapshot.record_health(health("xmip:///n/receive/a", Health::Fine, 0));
 
-        assert_eq!(
-            snapshot.worst("xmip:///n/receive/a"),
-            Some(Health::Stressed)
-        );
+        assert_eq!(snapshot.worst("xmip:///n/receive/a"), Some(Health::Paused));
     }
 }
