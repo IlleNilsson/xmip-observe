@@ -51,6 +51,10 @@ pub enum Counted {
     Messages,
     Journeys,
     Bytes,
+    /// Delivery or processing attempts awaiting another try.
+    Retrying,
+    /// Delivery or processing outcomes that ended unsuccessfully.
+    Failed,
 }
 
 /// The severity a paused scope publishes. A category, not a measurement: a
